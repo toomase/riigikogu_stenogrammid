@@ -1,0 +1,103 @@
+---
+title: "Riigikogu 13. koosseisu stenogrammid"
+output: html_notebook
+---
+```{r setup, message = FALSE, warning=FALSE}
+## Lae andmed ja paketid
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidytext)
+library(tidyr)
+library(ggplot2)
+library(igraph)
+library(ggraph)
+library(readr)
+library(scales)
+library(extrafont)
+library(ggthemes)
+
+load(file = "data/stenogrammid.Rdata")
+load("data/stop_words_est.RData")
+load("data/sonade_emotsioon_est.RData")
+```
+
+```{r}
+# Üksikud sõnad Vabariigi aastapäeva kõnedest
+ministrite_konede_sonad <- stenogrammid %>%
+    unnest_tokens(word, tekst) %>%
+    # lisa sorteerimiseks unikaalne id
+    mutate(id = row_number()) %>%
+    # eemalda nn stoppsõnad
+    anti_join(stop_words_est, by = c("word" = "sona")) %>%
+    filter(!str_detect(word, "[0-9]")) %>%
+    arrange(id)
+```
+
+```{r}
+# top 20 sõna graafikul
+ministrite_konede_sonad %>%
+    count(word, sort = TRUE) %>%
+    # top 20
+    top_n(., 20) %>%
+    ungroup() %>%
+    # reasta sõnad kahanevalt
+    mutate(word = reorder(word, n)) %>%
+    ggplot(aes(word, n)) +
+    geom_bar(stat = "identity", fill = "#2b8cbe", alpha = 0.7) +
+    # kaota tühi ruum y-skaala ümber
+    scale_y_continuous(expand = c(0, 0)) +
+    coord_flip() +
+    # labs(title = "TOP 20 sõna presidentide aastapäeva kõnedes",
+    #      subtitle = "Arvesse on võetud kogu 24-aastane periood",
+    #      y = "sõna esinemissagedus") +
+    theme_bw(base_family = "Chivo") +
+    theme(axis.title.y = element_blank(),
+          axis.title.x = element_text(size = 10),
+          panel.border = element_blank())
+
+```
+
+```{r, fig.height=10, fig.width=8}
+# Presidentidele kõige iseloomulikumad sõnad kõnedes
+graafikule <- ministrite_konede_sonad %>%
+    count(nimi, word, sort = TRUE) %>%
+    ungroup() %>%
+    # leia sõnade tähtsus iga presidendi kohta (kõige iseloomulikumad sõnad)
+    bind_tf_idf(word, nimi, n) %>%
+    arrange(desc(tf_idf)) %>%
+    mutate(word = factor(word, levels = rev(unique(word)))) %>%
+    group_by(nimi) %>% 
+    top_n(6) %>% 
+    ungroup()
+```
+
+```{r}
+stenogrammid %>%
+    distinct(nimi)
+```
+
+
+```{r}
+graafikule %>%
+    filter(nimi %in% c("Mart Helme", "Martin Helme", "Priit Toobal")) %>%
+    ggplot(aes(word, tf_idf, fill = nimi)) +
+    geom_bar(alpha = 0.8, stat = "identity", show.legend = FALSE) +
+    # labs(title = "nimiidele iseloomulikud sõnad aastapäeva kõnedes",
+    #      subtitle = "Sõnade tähtsuse hindamise mõõtühikuks on tf-idf (term frequency–inverse document frequency)",
+    #      x = NULL, y = NULL) +
+    scale_y_continuous(labels = comma) +
+    facet_wrap(~nimi, ncol = 2, scales = "free") +
+    coord_flip() +
+    theme_tufte() +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(size = 9),
+          text = element_text(family = "Chivo"),
+          plot.title = element_text(size = 14, face = "bold"),
+          strip.text = element_text(size = 11))
+```
+
+
+## visualiseeri tulemused Riigikogu saali plaani peale
+## iga riigikogu liikme peale hiirega minnes kuvatakse kõige iseloomulikum sõna
+## saali plaan: http://www.riigikogu.ee/riigikogu/koosseis/saali-plaan/
