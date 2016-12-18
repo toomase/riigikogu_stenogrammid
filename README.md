@@ -1,2 +1,2 @@
 # riigikogu_stenogrammid
-Riigikogu XIII stenogrammide analüüs
+*Riigikogu XIII stenogrammide tekstianalüüs
