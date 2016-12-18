@@ -2,6 +2,7 @@
 title: "Riigikogu 13. koosseisu stenogrammid"
 output: html_notebook
 ---
+
 ```{r setup, message = FALSE, warning=FALSE}
 ## Lae andmed ja paketid
 library(dplyr)
@@ -10,79 +11,434 @@ library(lubridate)
 library(tidytext)
 library(tidyr)
 library(ggplot2)
-library(igraph)
-library(ggraph)
-library(readr)
 library(scales)
 library(extrafont)
 library(ggthemes)
+library(purrr)
+library(forcats)
 
 load(file = "data/stenogrammid.Rdata")
 load("data/stop_words_est.RData")
 load("data/sonade_emotsioon_est.RData")
+load("output/riigikogulaste_populaarsus.RData")
 ```
 
-```{r}
-# Üksikud sõnad Vabariigi aastapäeva kõnedest
-ministrite_konede_sonad <- stenogrammid %>%
-    unnest_tokens(word, tekst) %>%
-    # lisa sorteerimiseks unikaalne id
-    mutate(id = row_number()) %>%
-    # eemalda nn stoppsõnad
+```{r sonavotud_tidyed}
+# töötle andmeid nii, et iga sõna ja lause oleks eraldi real
+sonavotud_tidyed <- stenogrammid %>%
+    # igale sõnavõtule indeks külge
+    mutate(indeks_sonavott = row_number(),
+           # paranda viga kus punktile ei järgne tühik
+           tekst = str_replace_all(tekst, "\\.", "\\. ")) %>%
+    unnest_tokens(sentence, tekst, token = 'sentences') %>% 
+    # igale lausele indeks külge
+    mutate(indeks_sentence = row_number()) %>% 
+    # leia kõik sõnad lausetest
+    unnest_tokens(word, sentence, drop = FALSE)
+```
+
+```{r emotsioon_sonavottudes, fig.height = 9, fig.width = 8}
+# Riigikogu liikmete sõnavõttude emotsioon - neg vs pos
+sonavottude_emotsioon <- sonavotud_tidyed %>% 
+    #eemalda nn stoppsõnad
     anti_join(stop_words_est, by = c("word" = "sona")) %>%
-    filter(!str_detect(word, "[0-9]")) %>%
-    arrange(id)
+    # eemalda numbrid ja lugupidamisavaldused
+    filter(!str_detect(word, "[0-9]"),
+           !word %in% c("aitäh", "tänan", "austatud")) %>%
+    # joini juurde sõnade emotsiooni kirjeldavad tunnused
+    left_join(sonade_emotsioon_est %>%
+                   distinct(sona, emotsioon_nr, emotsioon_sona), by = c("word" = "sona")) %>%
+    # ainult Riigikogu liikmed
+    filter(amet == "Riigikogu liige") %>% 
+    # riigikoguliikmete ja sõnavõttude lõikes emotsioon (negatiivsed sõnad pluss positiivsed)
+    group_by(nimi) %>%
+    summarise(sonu_kokku = n(),
+              neg = sum(ifelse(emotsioon_nr == -1, 1, NA), na.rm = TRUE),
+              pos = sum(ifelse(emotsioon_nr == 1, 1, NA), na.rm = TRUE),
+              neg_osakaal = neg / sonu_kokku,
+              pos_osakaal = pos / sonu_kokku,
+              neg_suhe_pos = neg / (neg + pos),
+              pos_suhe_neg = pos / (neg + pos)) %>%
+    ungroup() %>% 
+    arrange(desc(pos_suhe_neg))
 ```
 
-```{r}
-# top 20 sõna graafikul
-ministrite_konede_sonad %>%
-    count(word, sort = TRUE) %>%
-    # top 20
-    top_n(., 20) %>%
-    ungroup() %>%
-    # reasta sõnad kahanevalt
-    mutate(word = reorder(word, n)) %>%
-    ggplot(aes(word, n)) +
-    geom_bar(stat = "identity", fill = "#2b8cbe", alpha = 0.7) +
-    # kaota tühi ruum y-skaala ümber
-    scale_y_continuous(expand = c(0, 0)) +
+Kuna tekstianalüüs ja -visualiseerimine tundub huvitav, siis jätkan seda Riigikogu 13. koosseisu stenogrammidega. Need võiksid anda päris hea ülevaate Riigikogu liikmete keelekasutusest, lemmik teemadest, meelsusest jms.
+
+Kõik stenogrammid pärinevad [Riigikogu kodulehelt](https://www.riigikogu.ee/). Enamus kasutatud andmeanalüüsi meetoditest ja töövõtetest on inspireeritud blogist [data science ish](http://juliasilge.com/blog/).
+
+
+### Emotsioon
+
+Alustuseks vaatan, milline on Riigikogu liikmete sõnavõttude emotsioon (positiivne vs negatiivne). All oleval graafikul on top 10 Riigikogulast, kelle sõnavõttudes domineerivad positiivsed sõnad ning top 10, kelle sõnavõttudes domineerivad negatiivsed sõnad. Selle hindamiseks on võrreldud positiivsete sõnade osakaalu kõigist emotsionaalselt laetud sõnadest (st pos + neg sõnad kokku). Kui kõige positiivsemal sõnavõtjal, __Heidy Purgal__ on positiivsete sõnade osakaal __86%__, siis kõige negatiivsemal, __Eerik-Niiles Krossil 42%__.
+
+```{r sonavottude_emotsioon_graafikul, fig.height=5, fig.width=7}
+sonavottude_emotsioon %>% 
+    # ainult need Riigikogulased, ke son vähemalt 500 sõna öelnud
+    filter(sonu_kokku > 500) %>%
+    # top 10 pos ja neg
+    mutate(top_bottom = ifelse(row_number() < 11, 1,
+                               ifelse(row_number() > 97, 0, NA)),
+           nimi = reorder(nimi, pos_suhe_neg)) %>% 
+    filter(!is.na(top_bottom)) %>% 
+    ggplot(aes(nimi, pos_suhe_neg, fill = as.factor(top_bottom))) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    scale_y_continuous(labels = scales::percent, expand = c(0, 0)) +
+    geom_text(aes(x = nimi, y = 0, label = str_c(round(pos_suhe_neg, 2) * 100, "%")),
+              size = 3, hjust = -0.4) +
     coord_flip() +
-    # labs(title = "TOP 20 sõna presidentide aastapäeva kõnedes",
-    #      subtitle = "Arvesse on võetud kogu 24-aastane periood",
-    #      y = "sõna esinemissagedus") +
-    theme_bw(base_family = "Chivo") +
-    theme(axis.title.y = element_blank(),
-          axis.title.x = element_text(size = 10),
-          panel.border = element_blank())
-
+    labs(title = "TOP 10 kõige positiivsemat ja negatiivsemat Riigikogulast",
+         subtitle = "Positiivsete sõnade osakaal kõigist emotsionaalselt laetud sõnadest (pos + neg)",
+         y = "pos sõnade osakaal",
+         x = NULL) +
+    scale_fill_manual(values = c("#67a9cf", "#ef8a62")) +
+    theme_tufte() +
+    guides(fill = FALSE) +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(size = 9),
+          text = element_text(family = "Chivo"),
+          plot.title = element_text(size = 13),
+          plot.subtitle = element_text(size = 9),
+          axis.title = element_text(size = 10))
 ```
 
-```{r, fig.height=10, fig.width=8}
-# Presidentidele kõige iseloomulikumad sõnad kõnedes
-graafikule <- ministrite_konede_sonad %>%
-    count(nimi, word, sort = TRUE) %>%
-    ungroup() %>%
-    # leia sõnade tähtsus iga presidendi kohta (kõige iseloomulikumad sõnad)
-    bind_tf_idf(word, nimi, n) %>%
-    arrange(desc(tf_idf)) %>%
-    mutate(word = factor(word, levels = rev(unique(word)))) %>%
-    group_by(nimi) %>% 
-    top_n(6) %>% 
+```{r, message=FALSE, warning=FALSE}
+# leia näited positiivsete ja negatiivsete sõnavõttude kohta
+sonavottude_emotsioon_naited <- sonavotud_tidyed %>% 
+    #eemalda nn stoppsõnad
+    anti_join(stop_words_est, by = c("word" = "sona")) %>%
+    # eemalda numbrid ja lugupidamisavaldused
+    filter(!str_detect(word, "[0-9]"),
+           !word %in% c("aitäh", "tänan", "austatud")) %>%
+    # joini juurde sõnade emotsiooni kirjeldavad tunnused
+    left_join(sonade_emotsioon_est %>%
+                   distinct(sona, emotsioon_nr, emotsioon_sona), by = c("word" = "sona")) %>%
+    # ainult Riigikogu liikmed
+    filter(amet == "Riigikogu liige") %>% 
+    # riigikoguliikmete ja sõnavõttude lõikes emotsioon (negatiivsed sõnad pluss positiivsed)
+    group_by(indeks_sonavott) %>%
+    summarise(sonu_kokku = n(),
+              neg = sum(ifelse(emotsioon_nr == -1, 1, NA), na.rm = TRUE),
+              pos = sum(ifelse(emotsioon_nr == 1, 1, NA), na.rm = TRUE),
+              neg_osakaal = neg / sonu_kokku,
+              pos_osakaal = pos / sonu_kokku,
+              neg_suhe_pos = neg / (neg + pos),
+              pos_suhe_neg = pos / (neg + pos)) %>%
+    ungroup() %>% 
+    arrange(desc(neg_suhe_pos))
+
+top_sonavottude_emotsioon <- sonavottude_emotsioon_naited%>% 
+    head(100)
+
+bottom_sonavottude_emotsioon <- sonavottude_emotsioon_naited %>%
+    filter(!is.na(neg_suhe_pos)) %>% 
+    tail(100)
+
+# sõnade emotsioon ja stenogrammi tekst kokku
+top_emotsioon<- stenogrammid %>% 
+    mutate(indeks_sonavott = row_number()) %>% 
+    inner_join(top_sonavottude_emotsioon) %>% 
+    select(kuupaev, nimi, tekst:pos_suhe_neg)
+
+bottom_emotsioon<- stenogrammid %>% 
+    mutate(indeks_sonavott = row_number()) %>% 
+    inner_join(bottom_sonavottude_emotsioon) %>% 
+    select(kuupaev, nimi, tekst:pos_suhe_neg)
+```
+
+Lisan ühe näite positiivse sõnavõtu kohta, kus domineerivad positiivsed sõnad:
+
+__Urmas Reinsalu__ 30.03.2015: "*Palju õnne Eiki Nestorile! Me leidsime Isamaa ja Res Publica Liidus samuti, et Riigikogu juhatus peab olema tugev ja otsustuskindel, ning me esitame väga hea kandidaadi Riigikogu juhatusse. Ma sean üles Helir-Valdor Seederi kandidatuuri. Kes meist teda ei teaks! Palun hääletada ja toetada! Aitäh!*""
+
+ja teise näite, kus domineerivad negatiivsed sõnad:
+
+__Märt Sults__ 14.11.2016: "*Aitäh, härra spiiker! Hea minister! Mu küsimus on sutsu küüniline, aga see on selline. Kust kohast läheb haigekassa punane joon ja kust kohast hakkavad pihta nõndanimetatud ravimatud haigused, mida haigekassa ei finantseeri, kui lihtne haigus muutub varsti rahapuuduse tõttu ravimatuks haiguseks?*"
+
+
+```{r silpide_funktsioon}
+## Funktsiooni abil saab arvutada silpide arvu sõnas. Põhineb inglise keelel, aga enam-vähem töötab ka eesti keele osas.
+
+## ENGLISH_SYLLABLE_COUNT()
+## Version 1.02.  Tyler Kendall, June 10, 2014
+
+## This function counts the number of syllables in 'ortho'
+## Converted to R from SLAAP (http://ncslaap.lib.ncsu.edu/) version in PHP 
+## Originally based on Greg Fast's Lingua::EN::Syllable Perl Module
+## That had an error rate of ~15% (though almost all errors off by just one syllable)
+## This achieves close to 100% but will err on unusual words which are not
+## in the lists of exceptions.
+
+## Reference/Citation
+##   Kendall, Tyler (2013). Speech rate, pause, and language variation: Studies in corpus sociophonetics. Basingstoke, UK: Palgrave Macmillan. [ http://ncslaap.lib.ncsu.edu/speechrateandpause/ ]
+
+## Usage examples (first source this file) 
+##   english_syllable_count("Happy times are here again!") # == 7
+##   english_syllable_count(c("Happy", "times", "are", "here", "again!")) # == 7
+##   sapply(c("Happy", "times", "are", "here", "again!"), english_syllable_count) # == c(2, 1, 1, 1, 2) # with names
+
+count_syllables <- function(ortho) {
+
+    # Can add words to these lists of 2 syllable and 3 syllable 'exceptions'
+    # Note that final -e is stripped before checking these lists!
+    Specials.2 <- c('every', 'different', 'family', 'girl', 'girls', 'world', 'worlds', 'bein', 'being', 'something', 'mkay', 'mayb')
+    Specials.3 <- c('anyon', 'everyon') # final -e is dropped   
+
+    # Regular Expression exceptions
+    # SubSyl - remove a syllable from the count for each sub-string match
+    SubSyl <- c('cial',
+                'tia',
+                'cius',
+                'cious',
+                'giu',              # belgium!
+                'ion',
+                'iou',
+                '^every',           # every, but also everything, everybody
+                'sia$',
+                '.ely$',            # absolutely! (but not ely!)
+                '[^szaeiou]es$',    # fates, but not sasses
+                '[^tdaeiou]ed$',    # trapped, but not fated
+                '^ninet',           # nineteen, ninety
+                '^awe'              # awesome
+    )
+
+    # AddSyl - add a syllable to the count for each sub-string match
+    AddSyl <- c('ia',
+                'rie[rt]',
+                'dien',
+                'ieth',
+                'iu',
+                'io',
+                'ii',
+                'ienc',       # ambience, science, ...
+                'les?$',
+                '[aeiouym][bp]l$',  # -Vble, plus -mble and -Vple
+                '[aeiou]{3}',       # agreeable
+                'ndl(ed)?$',        # handle, handled
+                'mpl(ed)?$',        # trample, trampled
+                '^mc',              # McEnery
+                'ism$',             # -isms
+                '([^aeiouy])\\1l(ed)?$',  # middle twiddle battle bottle, etc.
+                '[^l]lien',         # alien, salient [1]
+                '^coa[dglx].',      # [2]
+                '[^gq]ua[^aeiou]',  # i think this fixes more than it breaks
+                '[sd]nt$',          # couldn't, didn't, hasn't, wasn't,...
+                '\\wshes$',          # add one back for esh (since it's -'d)
+                '\\wches$',          #  and for affricate (witches)
+                '\\wges$',           #  and voiced (ages)
+                '\\wces$',        #  and sibilant 'c's (places)
+                '\\w[aeiouy]ing[s]?$'   # vowels before -ing = hiatus
+    )
+
+    tot_syls <- 0
+    ortho.l <- tolower(ortho)
+    stripchars <- "[:'\\[\\]]"
+    ortho.cl <- gsub(stripchars, "", ortho.l, perl=T)
+    spacechars <- "[\\W_]" # replace other non-word chars with space
+    ortho.cl <- gsub(spacechars, " ", ortho.cl, perl=T)
+    ortho.vec <- unlist(strsplit(ortho.cl, " ", perl=T))
+    ortho.vec <- ortho.vec[ortho.vec!=""]
+    for (w in ortho.vec) {
+        w <- gsub("e$", "", w, perl=T) # strip final -e
+        syl <- 0
+        # is word in the 2 syllable exception list?
+        if (w %in% Specials.2) {
+            syl <- 2
+
+            # is word in the 3 syllable exception list?
+        } else if (w %in% Specials.3) {
+            syl <- 3
+
+            # if not, than check the different parts...
+        } else {
+            for (pat in SubSyl) {
+                if (length(grep(pat, w, perl=T))>=1) 
+                    syl <- syl - 1
+            }
+            for (pat in AddSyl) {
+                if (length(grep(pat, w, perl=T))>=1) 
+                    syl <- syl + 1
+            }
+            if (nchar(w)==1) {
+                syl <- 1
+            } else {
+                chnk <- unlist(strsplit(w, "[^aeiouy:]+"))
+                chnk <- chnk[chnk!=""]
+                syl <- syl + length(chnk)
+                if (syl==0) syl <- 1
+            }
+        }
+        tot_syls <- tot_syls + syl
+    }
+    tot_syls
+}
+```
+
+```{r silpide_arv}
+# silpide arv sõnades
+# kuna tegemist on ajamahuka arvutusega, siis ei tasu seda iga kord uueti käivitada
+sonavotud_tidyed_silbid <- sonavotud_tidyed %>%
+    filter(amet == "Riigikogu liige") %>%
+    rowwise() %>%
+    mutate(silpide_arv = count_syllables(word)) %>%
     ungroup()
 ```
 
-```{r}
-stenogrammid %>%
-    distinct(nimi)
+```{r salvesta_silpide_arv}
+# salvesta ja lae silpide arvud
+# sonavotud_tidyed_silbid %>%
+#     select(kuupaev, nimi, indeks_sonavott, sentence, indeks_sentence, word, silpide_arv) %>%
+#     save(file = "output/sonavotud_tidyed_silbid.RData")
+
+load(file = "output/sonavotud_tidyed_silbid.RData")
 ```
 
 
-```{r}
-graafikule %>%
-    filter(nimi %in% c("Mart Helme", "Martin Helme", "Priit Toobal")) %>%
-    ggplot(aes(word, tf_idf, fill = nimi)) +
-    geom_bar(alpha = 0.8, stat = "identity", show.legend = FALSE) +
+```{r, message=FALSE, warning=FALSE}
+# arvuta SMOG iga Riigikogulase kohta
+sonavotud_smog <- sonavotud_tidyed_silbid %>% 
+    group_by(nimi) %>% 
+    summarise(n_sentence = n_distinct(indeks_sentence)) %>% 
+    left_join(sonavotud_tidyed_silbid %>%
+                  filter(silpide_arv >= 3) %>% 
+                  group_by(nimi) %>% 
+                  summarise(n_polysyllables = n())) %>% 
+    mutate(smog = 1.0430 * sqrt(30 * n_polysyllables/n_sentence) + 3.1291)
+```
+
+### Keelekasutus
+
+Järgnevalt analüüsin Riigikogulaste keelekasutust selles võtmes, et kui keeruliselt või lihtsalt keegi ennast väljendab. Analüüsi aluseks võtan Riigikogu liikmete sõnavõttude [SMOG hinde](https://en.wikipedia.org/wiki/SMOG) (*Simple Measure of Gobbledygook*). SMOG iseloomustab teksti loetavust ja seda võib tõlgendada nii: mitu klassi peab inimene olema koolis läbinud, et tekstist aru saada. Arvutuste aluseks on lausete pikkused ja palju-silbiliste sõnade hulk. Kuna see hinne on mõeldud ennekõike ingliskeelsete tekstide analüüsiks, siis ma ei tea kui hästi see eesti keelele kohandub. Samas midagi võiks see iseloomustada küll.
+
+Kuna Riigikogu liikmete sõnavõtud sisaldavad väga palju viiteid keerulistele õigusaktide nimedele ja muule juriidilisele tekstile, siis on need paratamatult üsna raskesti loetavad. Kui selle näitaja põhjal välja võtta kõige keerulisemalt ja kõige lihtsamalt ennast väljendav Riigikogu lige, siis need on vastavalt __Marko Mihkelson ja Valeri Korb__. Marko Mihkelsoni tekstist täielikult arusaamiseks oleks tinglikult vaja __18,5__ klassi haridust ja Valeri Korbi sõnavõttude mõistmiseks __13,4__ klassi haridust.
+
+```{r sonavotud_smog_graafikul, fig.height=5, fig.width=7}
+sonavotud_smog %>% 
+# ainult need Riigikogulased, kes on vähemalt 500 sõna öelnud
+    filter(n_sentence > 100, nimi != "Alar Karis") %>%
+    arrange(desc(smog)) %>% 
+    # top 10 pos ja neg
+    mutate(top_bottom = ifelse(row_number() < 11, 1,
+                               ifelse(row_number() > 94, 0, NA)),
+           nimi = reorder(nimi, smog)) %>% 
+    filter(!is.na(top_bottom)) %>% 
+    ggplot(aes(nimi, smog, fill = as.factor(top_bottom))) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    scale_y_continuous(expand = c(0, 0)) +
+    geom_text(aes(x = nimi, y = 0, label = sprintf("%.1f", round(smog, 1))),
+              size = 3, hjust = -0.4) +
+    coord_flip() +
+    labs(title = "TOP 10 kõige keerulisema ja lihtsama sõnakasutusega Riigikogulast",
+         subtitle = "SMOG hinne iseloomustab teksti loetavust ja seda võib tõlgendada nii:\nmitu klassi peab inimene olema koolis läbinud, et teksti mõista.",
+         y = "SMOG hinne",
+         x = NULL) +
+    scale_fill_manual(values = c("#91cf60", "#fc8d59")) +
+    theme_tufte() +
+    guides(fill = FALSE) +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(size = 9),
+          text = element_text(family = "Chivo"),
+          plot.title = element_text(size = 13),
+          plot.subtitle = element_text(size = 9),
+          axis.title = element_text(size = 10))
+```
+
+```{r, message=FALSE, warning=FALSE}
+# näited kõige keerulisemate ja lihtsamate sõnavõttude kohta
+smog <- sonavotud_tidyed_silbid %>% 
+    group_by(indeks_sonavott) %>% 
+    summarise(n_sentence = n_distinct(indeks_sentence)) %>% 
+    left_join(sonavotud_tidyed_silbid %>%
+                  filter(silpide_arv >= 3) %>% 
+                  group_by(indeks_sonavott) %>% 
+                  summarise(n_polysyllables = n())) %>% 
+    mutate(smog = 1.0430 * sqrt(30 * n_polysyllables/n_sentence) + 3.1291) %>% 
+    arrange(smog) 
+
+top_smog <- smog %>% 
+    head(100)
+
+bottom_smog <- smog %>% 
+    tail(100)
+
+top_smog_stenogramm <- stenogrammid %>% 
+    mutate(indeks_sonavott = row_number()) %>% 
+    inner_join(top_smog) %>% 
+    select(kuupaev, nimi, tekst:smog)
+
+bottom_smog_stenogramm <- stenogrammid %>% 
+    mutate(indeks_sonavott = row_number()) %>% 
+    inner_join(bottom_smog) %>% 
+    select(kuupaev, nimi, tekst:smog)
+
+```
+
+Kui hinnata sõnavõttude lõikes nende loetavust, siis paar näidet lihtsalt mõistetavatest tekstidest on siin:
+
+__Henn Põlluaas__ 14.09.2015: *"Palun mikrofoni, jah! Hallo-hallo! Kas kostab? Kas ei kuule? Hallo!"* (SMOG = 5,7)
+
+__Martin Helme__ 26.10.2016: *"Aitäh! Meile lubati kolme ministrit, me näeme ainult kahte. Mis nüüd saab?"* (SMOG = 7,8)
+
+Mõned näited keerulistest sõnavõttudest on järgmised:
+
+__Peeter Ernits__ 11.02.2016: *"Küsimus on see: kas kahekordne peaminister Tiit Vähi ei mõista rahvusvahelisi suhteid ja räägib riigivaenulikku juttu, nimetades Eestit tupikriigiks ning väites, et meil valitseb sõjahüsteeria ja selle tõttu takistab valitsus investeeringuid Ida-Virumaale?"* (SMOG = 24,5)
+
+__Viktor Vassiljev__ 19.01.2016: *"See on muidugi väga kurb, aga ma palun eelnõu toetada, sest seda ootavad tõesti väga paljud inimesed, kes tahaksid teile, lugupeetud koalitsioonisaadikud, ja ka meile, opositsioonisaadikutele, valimispäeval säravalt naeratada, demonstreerides oma loomulikke hambaid."* (SMOG = 24,5)
+
+```{r iseloomulikud_sonad_ylevaade}
+glimpse(sonavotud_tidyed)
+```
+
+```{r iseloomulikud_sonad, message=FALSE, warning=FALSE}
+# täienda stopwords nimekirja Riigikogule omaste sõnadega
+stop_words_est <- stop_words_est %>% 
+    bind_rows(data_frame(sona = c("eesistuja", "lugupeetud", "lugupeetav",
+                                  "härra", "lugupeetavad", "austatud", "spiiker",
+                                  "asespiiker", "and", "of", "juhatajale", "the"))) %>% 
+    distinct(sona)
+
+# Iga Riigikogu liikme top 5 iseloomulikku sõna
+riigikogulaste_iseloomulikud_sonad <- sonavotud_tidyed %>% 
+    filter(amet == "Riigikogu liige") %>% 
+    anti_join(stop_words_est, by = c("word" = "sona")) %>% 
+    filter(!str_detect(word, "[0-9]")) %>% 
+    count(nimi, word, sort = TRUE) %>% 
+    ungroup() %>% 
+    arrange(nimi) %>%
+    bind_tf_idf(word, nimi, n) %>%
+    arrange(nimi, desc(tf_idf)) %>%
+    group_by(nimi) %>% 
+    top_n(5) %>% 
+    group_by(nimi) %>% 
+    mutate(word = factor(word, levels = (unique(word)))) %>%
+    ungroup()
+```
+
+### Populaarsus ja eripära
+
+Selleks, et tuvastada igale Riigikogu liikmele kõige iseloomulikumad sõnad kasutan mõõdikut *tf-idf* (term frequency–inverse document frequency). Sisuliselt aitab see tuvastada sõnu, mis on kõigi Riigikogulaste sõnavõttudes kokku suhteliselt haruldased, aga konkreetse inimese puhul sagedasemad. Sama meetodit kasutasin ka oma eelmises postituses [http://eilat.ee/2016-11-19-presidentide-koned/](Eesti presidentide kõned).
+
+Selleks, et lõpptulemus hoomatav oleks, esitan iseloomulikud sõnad ainult top 10 *populaarse* Riigikogu liikme kohta. Populaarsuse hindamiseks kasutasin iga Riigikogulase Eesti Wikipedia lehe vaatamiste arvu. Tähelepanuväärne on, et __Martin Repinski__, kes vaatamiste arvu poolest on kõige populaarsem, tegi oma särava tulemuse ainult 4 päevaga. Kui enne valitsuse vahetust, novembri keskpaigas, oli huvi tema vastu leige (paar Wiki lehe vaatamist päevas), siis alates 19.11.2016 olid temast huvitatud kümned tuhanded inimesed päevas. Kuna see Wikipedia lehtede vaatamiste info on ka eradiseisvalt väga huvitav, siis ilmselt mõnes järgnevas postituses käsitlen seda põhjalikumalt. 
+
+Mis puudutab iseloomulikke sõnu, siis päris mitme Riigikogu liikme puhul lähevad need üksikud sõnad üsna hästi kokku nende üldise kuvandiga. Erand on ilmselt __Priit Toobal__, kes iseloomulike sõnade järgi oleks justkui väga pühendunud usklik. Tegelikult on tegemist sõnavõttudega Keskerakonna korraldatud ööistungitelt 10.06.2015 ja teemaks riigipühade nimekirja täiendamine.
+
+```{r iseloomulikud_sonad_graafik, fig.width = 8, fig.height = 9, warning=FALSE, message=FALSE}
+
+# top 10 riigikogulast, kelle artikleid on wikipedias kõige rohkem vaadatud
+populaarsemad <- riigikogulaste_populaarsus %>% 
+    arrange(desc(wiki_vaatamisi)) %>% 
+    top_n(10) %>% 
+    ungroup()
+
+# graafikul top 5 iseloomulikku sõna
+riigikogulaste_iseloomulikud_sonad %>%
+    inner_join(populaarsemad, by = c("nimi" = "nimi")) %>% 
+    mutate(nimi = factor(nimi), 
+           nimi = fct_rev(fct_reorder(nimi, wiki_vaatamisi))) %>% 
+    ggplot(aes(fct_rev(word), tf_idf)) +
+    geom_bar(alpha = 0.8, stat = "identity", show.legend = FALSE, fill = "#feb24c") +
+    labs(title = "Riigikogu liikmetele top 5 iseloomulikku sõna",
+         subtitle = "- Kuvatud on top 10 Riigikogu liiget selle järgi, kelle Wikipedia lehte on kõige rohkem vaadatud.\n- Sõnade tähtsuse hindamise mõõtühikuks on tf-idf (term frequency–inverse document frequency)",
+         x = NULL, y = NULL) +
     # labs(title = "nimiidele iseloomulikud sõnad aastapäeva kõnedes",
     #      subtitle = "Sõnade tähtsuse hindamise mõõtühikuks on tf-idf (term frequency–inverse document frequency)",
     #      x = NULL, y = NULL) +
@@ -98,6 +454,5 @@ graafikule %>%
 ```
 
 
-## visualiseeri tulemused Riigikogu saali plaani peale
-## iga riigikogu liikme peale hiirega minnes kuvatakse kõige iseloomulikum sõna
-## saali plaan: http://www.riigikogu.ee/riigikogu/koosseis/saali-plaan/
+### Kuidas?
+Tehniliselt sarnaneb antud postitus paljuski minu eelmise postitusega [http://eilat.ee/2016-11-19-presidentide-koned/](Eesti presidentide kõned). Seetõttu ei hakka ma detaile siin kordama. 
